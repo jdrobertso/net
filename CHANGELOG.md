@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.0
+
+- `net.client`: a client that does not block. `http::client` starts worker
+  threads. `submit` returns an id at once, and `poll`, `next` and
+  `progress` give the results. The client merges the cookies of all its
+  requests into one jar. It needs `goose build`.
+- `net.cookie`: `diff` and `apply` give and use the changes of a jar.
+- The default User-Agent is `goose-net/0.2`.
+
 ## v0.1.0
 
 The first release.

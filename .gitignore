@@ -6,3 +6,4 @@ examples/fetch
 examples/raw
 examples/session
 test/data/gen/
+examples/parallel

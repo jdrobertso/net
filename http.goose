@@ -56,7 +56,7 @@ struct Options {
     proxy: u8[..512] = "",            // "http://[user:password@]host:port"
     use_env_proxy: bool = true,       // when proxy is empty, use the environment
     no_proxy: u8[..1024] = "",        // the hosts that do not use proxy: "localhost,.example.com"
-    user_agent: u8[..256] = "goose-net/0.1",
+    user_agent: u8[..256] = "goose-net/0.2",
 }
 
 struct Response {
