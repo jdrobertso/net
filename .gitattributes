@@ -1,0 +1,5 @@
+# Text files keep LF line ends on all platforms. The test data must stay
+# byte for byte as make_fixtures.py wrote it, so git does not change it.
+* text=auto eol=lf
+test/data/** binary
+*.ps1 text eol=crlf
