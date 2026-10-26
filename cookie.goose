@@ -302,3 +302,65 @@ fn format_header(out: u8[>..]&, jar: const u8[:], u: url::Url, now: i64) {
 fn persistent(out: u8[>..]&, jar: const u8[:], now: i64) {
     each(jar) { c, line => if c.expires > now { out.append(line); out.push('\n'); } };
 }
+
+// ---------------------------------------------------------------- deltas
+
+// A worker thread has its own copy of a jar. A delta gives the changes of
+// that copy, so that the thread that owns the real jar can apply them. A
+// delta has one line for each change. "+" and a jar line set a cookie.
+// "-" and a jar line remove the cookie with that name, domain and path.
+
+fn same_key(a: Cookie, b: Cookie) -> bool {
+    a.name == b.name && url::equal_ci(a.domain, b.domain) && a.path == b.path
+}
+
+fn has_line(jar: const u8[:], line: const u8[:]) -> bool {
+    var p = 0;
+    while p < jar.len {
+        let l, next = line_at(jar, p);
+        if l == line { return true; }
+        p = next;
+    }
+    return false;
+}
+
+// True if `lines` has a cookie with the key of `c`. `skip` is the count of
+// bytes before each jar line: 1 in a delta, 0 in a jar.
+fn has_key(lines: const u8[:], c: Cookie, skip: i64) -> bool {
+    var p = 0;
+    while p < lines.len {
+        let l, next = line_at(lines, p);
+        p = next;
+        guard l.len > skip else { continue; }
+        let o, ok = parse_line(l[skip..]);
+        if ok && same_key(o, c) { return true; }
+    }
+    return false;
+}
+
+// Appends the delta that changes the jar `before` into the jar `after`.
+fn diff(out: u8[>..]&, before: const u8[:], after: const u8[:]) {
+    each(after) { c, line =>
+        if !has_line(before, line) { out.push('+'); out.append(line); out.push('\n'); }
+    };
+    each(before) { c, line =>
+        if !has_key(after, c, 0) { out.push('-'); out.append(line); out.push('\n'); }
+    };
+}
+
+// Applies a delta from diff to the jar.
+fn apply(jar: u8[>..]&, delta: const u8[:]) {
+    guard delta.len > 0;
+    var next: u8[>..] = [];
+    each(jar) { c, line =>
+        if !has_key(delta, c, 1) { next.append(line); next.push('\n'); }
+    };
+    var p = 0;
+    while p < delta.len {
+        let l, nx = line_at(delta, p);
+        p = nx;
+        if l.len > 1 && l[0] == '+' { next.append(l[1..]); next.push('\n'); }
+    }
+    jar.clear();
+    jar.append(next);
+}

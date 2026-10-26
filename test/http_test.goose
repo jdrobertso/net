@@ -11,6 +11,7 @@
 import net from "..";
 import net.http;
 import net.compress;
+import net.client;
 import std;
 import os;
 
@@ -112,6 +113,8 @@ fn respond(c: net::Conn, req: u8[:], head_len: i64) -> bool {
     if path == "/redirect" { send_response(c, "302 Found", "Location: hello\r\n", "", is_head); return true; }
     if path == "/see-other" { send_response(c, "303 See Other", "Location: /echo\r\n", "", is_head); return true; }
     if path == "/loop" { send_response(c, "302 Found", "Location: /loop\r\n", "", is_head); return true; }
+    if path == "/setcookie-a" { sleep_ms(300); send_response(c, "200 OK", "Set-Cookie: a=1; Path=/\r\n", "a", is_head); return true; }
+    if path == "/setcookie-b" { sleep_ms(300); send_response(c, "200 OK", "Set-Cookie: b=2; Path=/\r\n", "b", is_head); return true; }
     if path == "/setcookie" {
         send_response(c, "200 OK", "Set-Cookie: k=v; Path=/\r\nSet-Cookie: other=2; Path=/\r\n", "set", is_head);
         return true;
@@ -212,7 +215,7 @@ fn main() {
     let l = net::listen("127.0.0.1", 0);
     guard net::ok(l) else { print("cannot listen: ", net::error()); exit(1); }
     let port = net::local_port(l);
-    for i in 4 { thread_spawn(server, l); }
+    for i in 16 { thread_spawn(server, l); }
     let base = str("http://127.0.0.1:", port);
     let opts = http::Options { use_env_proxy: false, .. };
     var s = http::session(opts);
@@ -334,6 +337,75 @@ fn main() {
         if !http::ok(t2) || ts.pool.len != 1 { fail(str("tunnel keep-alive: ", http::error(t2))); }
         http::close(ts);
         print("online: the CONNECT tunnel test ran");
+    }
+
+    // ---- the client that does not block
+    {
+        var cl = http::client(opts, 4);
+
+        // Four requests of 2 s each, on four workers: about 2 s in total, and
+        // the main thread continues while they run.
+        let t0 = clock();
+        for i in 4 { http::submit(cl, "GET", str(base, "/slow")); }
+        var loops = 0;
+        var done = 0;
+        while done < 4 {
+            let id, r = http::poll(cl);
+            if id < 0 { loops++; sleep_ms(5); continue; }
+            if r.status != 200 || http::body(r) != "late" { fail(str("client: job ", id, " gave ", r.status)); }
+            done++;
+        }
+        let secs = clock() - t0;
+        if secs > 3.5 { fail(str("client: four parallel requests took ", secs, " s")); }
+        if loops < 10 { fail("client: the main thread did not run while it waited"); }
+
+        // next with a time limit.
+        http::submit(cl, "GET", str(base, "/slow"));
+        let tid, _ = http::next(cl, 50);
+        if tid != -1 { fail("client: next must give -1 when the time limit expires"); }
+        let sid, sr = http::next(cl);
+        if sid < 0 || sr.status != 200 { fail("client: next without a time limit"); }
+        let nid, _ = http::next(cl);
+        if nid != -1 { fail("client: next with nothing in flight must give -1 at once"); }
+
+        // Two requests that set cookies at the same time: the jar keeps both.
+        let ia = http::submit(cl, "GET", str(base, "/setcookie-a"));
+        let ib = http::submit(cl, "GET", str(base, "/setcookie-b"));
+        http::next(cl);
+        http::next(cl);
+        let eid = http::submit(cl, "GET", str(base, "/echo"));
+        let _, er = http::next(cl);
+        if !contains(http::body(er), "Cookie: a=1; b=2\r\n") && !contains(http::body(er), "Cookie: b=2; a=1\r\n") {
+            fail(str("client: cookie merge: ", http::body(er)));
+        }
+
+        // Progress messages for a large body.
+        let pid = http::submit(cl, "GET", str(base, "/big"), "", "", true);
+        var last = 0;
+        var msgs = 0;
+        var big_len = 0;
+        loop {
+            let p, gotp = http::progress(cl);
+            if gotp {
+                if p.id != pid || p.got < last || p.total != 300000 { fail(str("client: progress ", p)); }
+                last = p.got;
+                msgs++;
+                continue;
+            }
+            let id, r = http::poll(cl);
+            if id == pid { big_len = http::body(r).len; break; }
+            sleep_ms(1);
+        }
+        // The worker sends the last Progress before Done, so the queue has all of them now.
+        loop { let p, gotp = http::progress(cl); guard gotp else { break; } last = p.got; msgs++; }
+        if big_len != 300000 || last != 300000 || msgs < 2 { fail(str("client: progress gave ", msgs, " messages, last ", last, ", body ", big_len)); }
+
+        // A failure comes back as a Response with status 0.
+        http::submit(cl, "GET", "http://127.0.0.1:1/");
+        let _, xr = http::next(cl);
+        if http::ok(xr) || !contains(http::error(xr), "cannot connect") { fail(str("client: error ", http::error(xr))); }
+
+        http::close(cl);
     }
 
     // ---- data: URLs

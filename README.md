@@ -8,6 +8,7 @@ does not have yet:
 - URL parsing, resolution, percent-encoding, `data:` URLs and IDNA
 - an HTTP/1.1 client with sessions, keep-alive, cookies, redirects,
   proxies, gzip and deflate, and streamed downloads
+- a client that does not block: requests run on worker threads, in parallel
 - DEFLATE, zlib and gzip decoders, which PNG decoders can use too
 
 The C part (`src/net.c`) does only the work that needs the operating system:
@@ -19,7 +20,7 @@ Declare the package in the root file of your program, then import the
 modules that you use:
 
 ```goose
-import net from "jdrobertso/net@v0.1.0";
+import net from "jdrobertso/net@v0.2.0";
 import net.http;
 ```
 
@@ -44,6 +45,7 @@ library.
 | `net` | `net::` | TCP connections as `Conn` handles, TLS, listeners, name resolution |
 | `net.url` | `url::` | URL parsing (RFC 3986), resolution, percent-encoding, query and form helpers, `data:` URLs, IDNA host names |
 | `net.http` | `http::` | the HTTP/1.1 client: `get`, `request`, `stream`, `Session`, `Options` |
+| `net.client` | `http::` | the client that does not block: `Client`, `submit`, `poll`, `next`, `progress` |
 | `net.cookie` | `cookie::` | the cookie jar of a session (RFC 6265) |
 | `net.compress` | `compress::` | `inflate`, `zlib_decompress`, `gunzip`, `crc32`, `adler32` |
 
@@ -52,7 +54,7 @@ library.
 ### One request
 
 ```goose
-import net from "jdrobertso/net@v0.1.0";
+import net from "jdrobertso/net@v0.2.0";
 import net.http;
 import std;
 
@@ -111,8 +113,33 @@ loop {
 }
 ```
 
+### Requests that do not block
+
+`net.client` runs requests on worker threads. The calling thread continues,
+for example to draw the frames of a window. `submit` returns an id at once.
+`poll` gives a complete response if there is one, and never waits.
+
+```goose
+import net.client;
+
+var c = http::client();                         // 4 worker threads
+let page = http::submit(c, "GET", "https://example.com/");
+let logo = http::submit(c, "GET", "https://example.com/logo.png");
+while http::pending(c) > 0 {
+    let id, r = http::poll(c);
+    if id == page { show_page(r); }
+    if id == logo { show_image(r); }
+    draw_frame();
+}
+http::close(c);
+```
+
+The client needs `goose build`, because it starts threads. See
+[Threads](#threads).
+
 More examples are in `examples/`: `fetch.goose` (a small curl),
-`session.goose` and `raw.goose` (only the `net` layer).
+`session.goose`, `parallel.goose` (the client that does not block) and
+`raw.goose` (only the `net` layer).
 
 ## The design
 
@@ -156,9 +183,21 @@ very large output.
 
 The handle table in C has a lock, and each thread has its own last error.
 Thus several `thread_fn` workers can download at the same time. Each
-worker must use its own connections and its own `Session`. Threads need
-`goose build`. The in-process run (`goose file.goose`) does not support
-them.
+worker must use its own connections and its own `Session`.
+
+`net.client` uses this. Each worker is a `thread_fn` with its own
+`Session`, so a worker keeps its connections open between jobs. The
+requests and the responses go through the typed queues of Goose as flat
+values. The client keeps the cookie jar. Each job takes a copy of the
+jar, and the worker sends back only the changes. Thus two requests at the
+same time cannot lose the cookies of each other. A program can have only
+one `Client` at a time, because all the workers share the same queues.
+
+Threads need `goose build`. The in-process run (`goose file.goose`) cannot
+start them, and the compiler says so. The functions in `net.http` do not
+use threads, so they work in the two forms. An executable from
+`goose build` needs nothing that Windows does not have. On Linux, it needs
+`libssl3` for TLS.
 
 ## API reference
 
@@ -221,10 +260,25 @@ The fields of `Options`, with their defaults:
 | `proxy` | "" | an `http://[user:password@]host:port` proxy |
 | `use_env_proxy` | true | when `proxy` is empty, use `http_proxy`, `HTTPS_PROXY` and `NO_PROXY` |
 | `no_proxy` | "" | hosts that do not use the proxy, for example `"localhost,.example.com"` |
-| `user_agent` | "goose-net/0.1" | the default `User-Agent` |
+| `user_agent` | "goose-net/0.2" | the default `User-Agent` |
 
 A Goose struct literal must give its fields in this sequence, for example
 `http::Options { timeout_ms: 5000, proxy: "http://proxy:3128", .. }`.
+
+### `net.client`
+
+These functions are in the `http::` namespace.
+
+| Function | Description |
+|---|---|
+| `client(opts, workers = 4) -> Client` | Starts the worker threads. |
+| `submit(c, method, url, headers = "", body = "", progress = false) -> i64` | Starts a request and returns its id at once. |
+| `poll(c) -> id, Response` | A complete response, or -1. It never waits. |
+| `next(c, timeout_ms = -1) -> id, Response` | Waits for the next complete response. -1 when the time limit expires, or when no request is in flight. |
+| `progress(c) -> Progress, bool` | The next `Progress { id, got, total }` message of a request with `progress`. |
+| `pending(c) -> i64` | The count of requests that are not complete. |
+| `close(c)` | Stops the workers, after the jobs in the queue. |
+| `load_cookies(c, path)`, `save_cookies(c, path)` | Read and write the cookie jar of the client. |
 
 ### `cookie` and `compress`
 
@@ -264,7 +318,9 @@ These features are not in the package yet:
 - TLS for servers. `listen` gives plain TCP only.
 - The Public Suffix List for cookies, and the Unicode mapping of IDNA (UTS #46).
 - Request bodies in parts (chunked uploads), multipart forms and `Expect: 100-continue`.
-- Calls that do not block. Use worker threads for parallel requests.
+- An event loop on one thread. `net.client` uses worker threads, so it
+  needs `goose build`.
+- Cancellation of a request that is in flight.
 
 ## License
 
