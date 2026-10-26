@@ -1,0 +1,8 @@
+# The executables that `goose build` writes beside each source file.
+*.exe
+*.pdb
+test/http_test
+examples/fetch
+examples/raw
+examples/session
+test/data/gen/

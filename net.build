@@ -1,0 +1,7 @@
+// The native part of the net package: sockets and TLS (src/net.c).
+// On Windows, the C uses Winsock and Schannel. On Linux and macOS, it uses
+// BSD sockets, and it loads OpenSSL at run time (see src/net.c).
+c_sources = ["src/net.c"];
+c_libs_windows = ["ws2_32", "secur32", "crypt32"];
+c_libs_linux = ["dl", "pthread"];
+exclude = ["examples", "test"];
